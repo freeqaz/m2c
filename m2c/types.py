@@ -965,6 +965,27 @@ class Type:
     def reg128() -> Type:
         return Type(TypeData(kind=TypeData.K_INT, size_bits=128))
 
+    # VMX128 vector types (128-bit SIMD)
+    @staticmethod
+    def v4f32() -> Type:
+        """128-bit vector of 4 floats (XMVECTOR)."""
+        return Type(TypeData(kind=TypeData.K_FLOAT, size_bits=128))
+
+    @staticmethod
+    def v4i32() -> Type:
+        """128-bit vector of 4 signed 32-bit integers."""
+        return Type(TypeData(kind=TypeData.K_INT, size_bits=128, sign=TypeData.SIGNED))
+
+    @staticmethod
+    def v4u32() -> Type:
+        """128-bit vector of 4 unsigned 32-bit integers."""
+        return Type(TypeData(kind=TypeData.K_INT, size_bits=128, sign=TypeData.UNSIGNED))
+
+    @staticmethod
+    def vec128() -> Type:
+        """Generic 128-bit vector type."""
+        return Type(TypeData(kind=TypeData.K_ANYREG, size_bits=128))
+
     @staticmethod
     def boolean() -> Type:
         return Type.intish()

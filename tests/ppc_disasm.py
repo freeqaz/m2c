@@ -4,6 +4,17 @@ import capstone as cs
 from typing import Any, BinaryIO, List, Optional, Set, TextIO, Tuple
 from elf_file import ElfFile, ElfSection, ElfSymbol
 
+# VMX128 disassembly support for Xbox 360 Xenon CPU
+try:
+    from vmx128_disasm import disasm_vmx128, is_vmx128_opcode
+except ImportError:
+    # VMX128 support not available - provide stubs
+    def disasm_vmx128(inst: int) -> Optional[str]:
+        return None
+
+    def is_vmx128_opcode(primary_op: int) -> bool:
+        return False
+
 # Based on `doldisasm.py` from camthesaxman:
 # https://gist.github.com/camthesaxman/a36f610dbf4cc53a874322ef146c4123
 
@@ -445,7 +456,14 @@ def disassemble_instruction(
         # fcmpo
         elif idx == 63 and idx2 == 32:
             asm = disasm_fcmp(raw)
-        # Paired singles
+        # VMX128 instructions (Xbox 360 Xenon) - try before paired singles
+        # VMX128 uses primary opcodes 4, 5, 6
+        elif is_vmx128_opcode(idx):
+            asm = disasm_vmx128(raw)
+            # Fall back to paired singles if VMX128 didn't match (opcode 4)
+            if asm is None and idx == 4:
+                asm = disasm_ps(raw)
+        # Paired singles (GameCube/Wii) - opcode 4
         elif idx == 4:
             asm = disasm_ps(raw)
         elif idx in {56, 57, 60, 61}:

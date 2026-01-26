@@ -47,6 +47,23 @@ The following compilers are supported:
 
 Supported languages are `c` and `c++`.
 
+### VMX128 Support (Xbox 360)
+
+m2c supports VMX128 SIMD instructions used by the Xbox 360 Xenon CPU:
+- 128 vector registers (v0-v127)
+- 75+ instructions for graphics/physics
+
+**Supported categories:** Load/Store, Arithmetic, Dot Products, Logical, Comparison, Select, Permute, Conversion, Estimates, Pack/Unpack
+
+**Example output:**
+```c
+v63 = __vmsum3fp128(v1, v1);     // 3D dot product
+v13 = v63 * v10;                  // vmulfp128
+v127 = __vsel128(v0, v11, v127);  // vector select
+```
+
+See `docs/VMX128.md` for the full instruction list and calling convention details.
+
 ### Multiple functions
 
 By default, `m2c` decompiles all functions in the text sections from the input assembly files.

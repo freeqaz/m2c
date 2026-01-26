@@ -431,7 +431,7 @@ class PpcArch(Arch):
     return_address_reg = Register("lr")
 
     base_return_regs = [(Register("r3"), False), (Register("f1"), True)]
-    all_return_regs = [Register(r) for r in ["f1", "r3", "r4"]]
+    all_return_regs = [Register(r) for r in ["f1", "r3", "r4", "v0"]]
     argument_regs = [
         Register(r)
         for r in [
@@ -456,17 +456,39 @@ class PpcArch(Arch):
             "f11",
             "f12",
             "f13",
+            # VMX128 vector argument registers (Xbox 360 Xenon calling convention)
+            # v1 is first XMVECTOR parameter
+            "v1",
+            "v2",
+            "v3",
+            "v4",
+            "v5",
+            "v6",
+            "v7",
+            "v8",
+            "v9",
+            "v10",
+            "v11",
+            "v12",
+            "v13",
         ]
     ]
     simple_temp_regs = [Register(r) for r in ["r11", "r12"]]
+    # VMX128 caller-saved temp registers (v14-v19)
+    vector_temp_regs = [Register(f"v{i}") for i in range(14, 20)]
+    # VMX128 extended registers (v32-v127) - all caller-saved
+    vector_extended_regs = [Register(f"v{i}") for i in range(32, 128)]
     temp_regs = (
         argument_regs
         + simple_temp_regs
+        + vector_temp_regs
+        + vector_extended_regs
         + [
             Register(r)
             for r in [
                 "r0",
                 "f0",
+                "v0",  # Vector return register
                 "cr0_gt",
                 "cr0_lt",
                 "cr0_eq",
@@ -520,6 +542,19 @@ class PpcArch(Arch):
             "f29",
             "f30",
             "f31",
+            # VMX128 callee-saved vector registers (v20-v31)
+            "v20",
+            "v21",
+            "v22",
+            "v23",
+            "v24",
+            "v25",
+            "v26",
+            "v27",
+            "v28",
+            "v29",
+            "v30",
+            "v31",
         ]
     ]
     all_regs = (
@@ -766,6 +801,9 @@ class PpcArch(Arch):
         if mnemonic.startswith("psq_l") or mnemonic.startswith("psq_st"):
             psq_imms = 2
             size = 8
+        # VMX128 load/store instructions use 16-byte vectors
+        if mnemonic.endswith("128"):
+            size = 16
 
         def make_memory_access(arg: Argument, size: int) -> List[Location]:
             assert size is not None
@@ -861,7 +899,11 @@ class PpcArch(Arch):
         elif mnemonic in cls.instrs_store:
             assert isinstance(args[0], Register) and size is not None
             is_store = True
-            if mnemonic.endswith("x"):
+            # VMX128 stores end with "128" but are all indexed (contain "x" before "128")
+            is_indexed = mnemonic.endswith("x") or (
+                mnemonic.endswith("128") and "x" in mnemonic
+            )
+            if is_indexed:
                 assert (
                     len(args) == 3 + psq_imms
                     and isinstance(args[1], Register)
@@ -928,7 +970,11 @@ class PpcArch(Arch):
 
         elif mnemonic in cls.instrs_load:
             assert isinstance(args[0], Register) and size is not None
-            if mnemonic.endswith("x"):
+            # VMX128 loads end with "128" but are all indexed (contain "x" before "128")
+            is_indexed = mnemonic.endswith("x") or (
+                mnemonic.endswith("128") and "x" in mnemonic
+            )
+            if is_indexed:
                 assert (
                     len(args) == 3 + psq_imms
                     and isinstance(args[1], Register)
@@ -1199,6 +1245,14 @@ class PpcArch(Arch):
         "stfsx": lambda a: make_storex(a, type=Type.f32()),
         "stfdx": lambda a: make_storex(a, type=Type.f64()),
         "psq_st": lambda a: None,
+        # VMX128 vector store instructions (Xbox 360 Xenon)
+        "stvx128": lambda a: make_storex(a, type=Type.v4f32()),
+        "stvxl128": lambda a: make_storex(a, type=Type.v4f32()),  # LRU hint
+        "stvewx128": lambda a: make_storex(a, type=Type.v4f32()),  # Element word
+        "stvlx128": lambda a: make_storex(a, type=Type.v4f32()),  # Left
+        "stvrx128": lambda a: make_storex(a, type=Type.v4f32()),  # Right
+        "stvlxl128": lambda a: make_storex(a, type=Type.v4f32()),  # Left LRU
+        "stvrxl128": lambda a: make_storex(a, type=Type.v4f32()),  # Right LRU
     }
     instrs_store_update: StoreInstrMap = {
         "stbu": lambda a: make_store(a, type=Type.int_of_size(8)),
@@ -1229,6 +1283,16 @@ class PpcArch(Arch):
         "lfsx": lambda a: handle_loadx(a, type=Type.f32()),
         "lfdx": lambda a: handle_loadx(a, type=Type.f64()),
         "psq_l": lambda a: ErrorExpr("psq_l unimplemented"),
+        # VMX128 vector load instructions (Xbox 360 Xenon)
+        "lvx128": lambda a: handle_loadx(a, type=Type.v4f32()),
+        "lvxl128": lambda a: handle_loadx(a, type=Type.v4f32()),  # LRU hint
+        "lvewx128": lambda a: handle_loadx(a, type=Type.v4f32()),  # Element word
+        "lvlx128": lambda a: handle_loadx(a, type=Type.v4f32()),  # Left
+        "lvrx128": lambda a: handle_loadx(a, type=Type.v4f32()),  # Right
+        "lvlxl128": lambda a: handle_loadx(a, type=Type.v4f32()),  # Left LRU
+        "lvrxl128": lambda a: handle_loadx(a, type=Type.v4f32()),  # Right LRU
+        "lvsl128": lambda a: handle_loadx(a, type=Type.v4f32()),  # For shift left
+        "lvsr128": lambda a: handle_loadx(a, type=Type.v4f32()),  # For shift right
     }
     instrs_load_update: InstrMap = {
         "lbau": lambda a: handle_load(a, type=Type.s8()),
@@ -1439,6 +1503,247 @@ class PpcArch(Arch):
             a.reg(3),
             type=Type.floatish(),
         ),
+        # Standard AltiVec Multiply-Add Operations
+        # vmaddfp: VD = VA * VB + VC (fused multiply-add)
+        "vmaddfp": lambda a: BinaryOp(
+            BinaryOp(a.reg(1), "*", a.reg(2), type=Type.v4f32()),
+            "+",
+            a.reg(3),
+            type=Type.v4f32(),
+        ),
+        # vnmsubfp: VD = -(VA * VC - VB) = VB - VA * VC (negative multiply-subtract)
+        "vnmsubfp": lambda a: BinaryOp(
+            a.reg(3),
+            "-",
+            BinaryOp(a.reg(1), "*", a.reg(2), type=Type.v4f32()),
+            type=Type.v4f32(),
+        ),
+        # vmr: Vector Move Register (pseudo-op for vor with same operands)
+        "vmr": lambda a: a.reg(1),
+        # VMX128 Multiply-Add Operations (Xbox 360 Xenon)
+        # vmaddfp128: VD = VA * VB + VS (where VS is same as VD)
+        # Encoding: VD = VA * VB + VD (accumulate into destination)
+        "vmaddfp128": lambda a: BinaryOp(
+            BinaryOp(a.reg(1), "*", a.reg(2), type=Type.v4f32()),
+            "+",
+            a.reg(0),
+            type=Type.v4f32(),
+        ),
+        # vmaddcfp128: VD = VA * VS + VB (different operand order - carryout variant)
+        # This is effectively: VD = VA * VD + VB (multiply with dest, add third operand)
+        "vmaddcfp128": lambda a: BinaryOp(
+            BinaryOp(a.reg(1), "*", a.reg(0), type=Type.v4f32()),
+            "+",
+            a.reg(2),
+            type=Type.v4f32(),
+        ),
+        # vnmsubfp128: VD = -(VA * VB - VS) = VS - VA * VB
+        # Negative multiply-subtract: negates the result of (VA * VB - VS)
+        "vnmsubfp128": lambda a: UnaryOp(
+            "-",
+            BinaryOp(
+                BinaryOp(a.reg(1), "*", a.reg(2), type=Type.v4f32()),
+                "-",
+                a.reg(0),
+                type=Type.v4f32(),
+            ),
+            type=Type.v4f32(),
+        ),
+        # VMX128 Dot Product Operations (Xbox 360 Xenon)
+        # vmsum3fp128: 3D dot product - result.xyzw = dot3(VA, VB)
+        # Result is broadcast to all lanes
+        "vmsum3fp128": lambda a: fn_op("__vmsum3fp128", [a.reg(1), a.reg(2)], Type.v4f32()),
+        # vmsum4fp128: 4D dot product - result.xyzw = dot4(VA, VB)
+        # Result is broadcast to all lanes
+        "vmsum4fp128": lambda a: fn_op("__vmsum4fp128", [a.reg(1), a.reg(2)], Type.v4f32()),
+        # VMX128 Arithmetic Operations (Xbox 360 Xenon)
+        # vaddfp128: Vector Add Floating Point - VD = VA + VB (per-lane)
+        "vaddfp128": lambda a: BinaryOp(a.reg(1), "+", a.reg(2), type=Type.v4f32()),
+        # vsubfp128: Vector Subtract Floating Point - VD = VA - VB (per-lane)
+        "vsubfp128": lambda a: BinaryOp(a.reg(1), "-", a.reg(2), type=Type.v4f32()),
+        # vmulfp128: Vector Multiply Floating Point - VD = VA * VB (per-lane)
+        "vmulfp128": lambda a: BinaryOp(a.reg(1), "*", a.reg(2), type=Type.v4f32()),
+        # vmaxfp128: Vector Maximum Floating Point - VD = max(VA, VB) (per-lane)
+        "vmaxfp128": lambda a: fn_op("__vmaxfp128", [a.reg(1), a.reg(2)], Type.v4f32()),
+        # vminfp128: Vector Minimum Floating Point - VD = min(VA, VB) (per-lane)
+        "vminfp128": lambda a: fn_op("__vminfp128", [a.reg(1), a.reg(2)], Type.v4f32()),
+        # VMX128 Logical Operations (Xbox 360 Xenon)
+        # vand128: Vector AND - VD = VA & VB
+        "vand128": lambda a: BinaryOp(a.reg(1), "&", a.reg(2), type=Type.v4f32()),
+        # vandc128: Vector AND with Complement - VD = VA & ~VB
+        "vandc128": lambda a: BinaryOp(
+            a.reg(1), "&", UnaryOp("~", a.reg(2), type=Type.v4f32()), type=Type.v4f32()
+        ),
+        # vnor128: Vector NOR - VD = ~(VA | VB)
+        "vnor128": lambda a: UnaryOp(
+            "~", BinaryOp(a.reg(1), "|", a.reg(2), type=Type.v4f32()), type=Type.v4f32()
+        ),
+        # vor128: Vector OR - VD = VA | VB
+        "vor128": lambda a: BinaryOp(a.reg(1), "|", a.reg(2), type=Type.v4f32()),
+        # vxor128: Vector XOR - VD = VA ^ VB
+        "vxor128": lambda a: BinaryOp(a.reg(1), "^", a.reg(2), type=Type.v4f32()),
+        # VMX128 Splat Operations (Xbox 360 Xenon)
+        # vspltw128: Splat Word - VD = splat(VB[uimm]) - replicates one word across all lanes
+        "vspltw128": lambda a: fn_op(
+            "__vspltw128", [a.reg(1), a.full_imm(2)], Type.v4f32()
+        ),
+        # vspltisw128: Splat Immediate Signed Word - VD = splat(simm)
+        # Format: VD, VB, SIMM - VB is unused, SIMM is at index 2
+        "vspltisw128": lambda a: fn_op("__vspltisw128", [a.full_imm(2)], Type.v4f32()),
+        # VMX128 Comparison Operations (Xbox 360 Xenon)
+        # These produce mask results: 0xFFFFFFFF (true) or 0x00000000 (false) per lane
+        # vcmpeqfp128: Compare Equal FP - VD = (VA == VB) ? 0xFFFFFFFF : 0
+        "vcmpeqfp128": lambda a: fn_op("__vcmpeqfp128", [a.reg(1), a.reg(2)], Type.v4f32()),
+        "vcmpeqfp128.": lambda a: fn_op("__vcmpeqfp128", [a.reg(1), a.reg(2)], Type.v4f32()),
+        # vcmpgefp128: Compare Greater-or-Equal FP - VD = (VA >= VB) ? 0xFFFFFFFF : 0
+        "vcmpgefp128": lambda a: fn_op("__vcmpgefp128", [a.reg(1), a.reg(2)], Type.v4f32()),
+        "vcmpgefp128.": lambda a: fn_op("__vcmpgefp128", [a.reg(1), a.reg(2)], Type.v4f32()),
+        # vcmpgtfp128: Compare Greater-Than FP - VD = (VA > VB) ? 0xFFFFFFFF : 0
+        "vcmpgtfp128": lambda a: fn_op("__vcmpgtfp128", [a.reg(1), a.reg(2)], Type.v4f32()),
+        "vcmpgtfp128.": lambda a: fn_op("__vcmpgtfp128", [a.reg(1), a.reg(2)], Type.v4f32()),
+        # vcmpbfp128: Compare Bounds FP - produces 2-bit code per lane for bounds checking
+        # For each lane: bit 0 = (VA > VB), bit 1 = (VA < -VB)
+        "vcmpbfp128": lambda a: fn_op("__vcmpbfp128", [a.reg(1), a.reg(2)], Type.v4f32()),
+        "vcmpbfp128.": lambda a: fn_op("__vcmpbfp128", [a.reg(1), a.reg(2)], Type.v4f32()),
+        # vcmpequw128: Compare Equal Unsigned Word - VD = (VA == VB) ? 0xFFFFFFFF : 0 (integer)
+        "vcmpequw128": lambda a: fn_op("__vcmpequw128", [a.reg(1), a.reg(2)], Type.v4u32()),
+        "vcmpequw128.": lambda a: fn_op("__vcmpequw128", [a.reg(1), a.reg(2)], Type.v4u32()),
+        # Standard AltiVec Select Operation
+        # vsel: Vector Select (bitwise mux) - VD = (VA & ~VC) | (VB & VC)
+        # Takes 4 operands: VD, VA, VB, VC
+        # For each bit: if VC bit is 1, select from VB; if 0, select from VA
+        "vsel": lambda a: fn_op("__vsel", [a.reg(1), a.reg(2), a.reg(3)], Type.v4f32()),
+        # VMX128 Select Operation (Xbox 360 Xenon)
+        # vsel128: Vector Select (bitwise mux) - VD = (VB & VC) | (VA & ~VC)
+        # Selects bits from VA or VB based on mask in VC (third operand)
+        # For each bit: if VC bit is 1, select from VB; if 0, select from VA
+        "vsel128": lambda a: fn_op("__vsel128", [a.reg(1), a.reg(2), a.reg(3)], Type.v4f32()),
+        # VMX128 Permute Operations (Xbox 360 Xenon)
+        # vperm128: VD = permute(VA, VB, VC) - byte-level permutation using VC as control
+        "vperm128": lambda a: fn_op(
+            "__vperm", [a.reg(1), a.reg(2), a.reg(3)], Type.v4f32()
+        ),
+        # vpermwi128: VD = permute_words(VB, PERM) - word-level permutation using immediate
+        "vpermwi128": lambda a: fn_op(
+            "__vpermwi", [a.reg(1), a.full_imm(2)], Type.v4f32()
+        ),
+        # VMX128 Shift/Rotate Operations (Xbox 360 Xenon)
+        # vsldoi128: Shift Left Double by Octet Immediate - concatenates VA:VB, extracts 16 bytes
+        "vsldoi128": lambda a: fn_op(
+            "__vsldoi", [a.reg(1), a.reg(2), a.full_imm(3)], Type.v4f32()
+        ),
+        # vrlw128: Rotate Left Word - each word rotated by corresponding word in VB
+        "vrlw128": lambda a: fn_op("__vrlw", [a.reg(1), a.reg(2)], Type.v4f32()),
+        # vslw128: Shift Left Word - each word shifted left by corresponding word in VB
+        "vslw128": lambda a: BinaryOp(a.reg(1), "<<", a.reg(2), type=Type.v4f32()),
+        # vsraw128: Shift Right Arithmetic Word - signed shift right
+        "vsraw128": lambda a: BinaryOp(a.reg(1), ">>", a.reg(2), type=Type.v4f32()),
+        # vsrw128: Shift Right Word - unsigned shift right
+        "vsrw128": lambda a: BinaryOp(a.reg(1), ">>", a.reg(2), type=Type.v4f32()),
+        # vslo128: Shift Left by Octet - shift by (VB & 0x78) bits
+        "vslo128": lambda a: fn_op("__vslo", [a.reg(1), a.reg(2)], Type.v4f32()),
+        # vsro128: Shift Right by Octet - shift by (VB & 0x78) bits
+        "vsro128": lambda a: fn_op("__vsro", [a.reg(1), a.reg(2)], Type.v4f32()),
+        # vrlimi128: Rotate Left Immediate and Mask Insert - uses immediate for rotation and mask
+        "vrlimi128": lambda a: fn_op(
+            "__vrlimi", [a.reg(1), a.full_imm(2), a.full_imm(3)], Type.v4f32()
+        ),
+        # VMX128 Merge Operations (Xbox 360 Xenon)
+        # vmrghw128: Merge High Words - VD = {VA.x, VB.x, VA.y, VB.y}
+        "vmrghw128": lambda a: fn_op("__vmrghw", [a.reg(1), a.reg(2)], Type.v4f32()),
+        # vmrglw128: Merge Low Words - VD = {VA.z, VB.z, VA.w, VB.w}
+        "vmrglw128": lambda a: fn_op("__vmrglw", [a.reg(1), a.reg(2)], Type.v4f32()),
+        # VMX128 Conversion Operations (Xbox 360 Xenon)
+        # vcfpsxws128: Convert Float to Signed Int (saturate) - VD = (s32)saturate(VA * 2^UIMM)
+        "vcfpsxws128": lambda a: fn_op(
+            "__vcfpsxws128", [a.reg(1), a.full_imm(2)], Type.v4i32()
+        ),
+        # vcfpuxws128: Convert Float to Unsigned Int (saturate) - VD = (u32)saturate(VA * 2^UIMM)
+        "vcfpuxws128": lambda a: fn_op(
+            "__vcfpuxws128", [a.reg(1), a.full_imm(2)], Type.v4u32()
+        ),
+        # vcsxwfp128: Convert Signed Int to Float - VD = (f32)(VA) / 2^UIMM
+        "vcsxwfp128": lambda a: fn_op(
+            "__vcsxwfp128", [a.reg(1), a.full_imm(2)], Type.v4f32()
+        ),
+        # vcfsx128: Alias for vcsxwfp128
+        "vcfsx128": lambda a: fn_op(
+            "__vcsxwfp128", [a.reg(1), a.full_imm(2)], Type.v4f32()
+        ),
+        # vcuxwfp128: Convert Unsigned Int to Float - VD = (f32)(VA) / 2^UIMM
+        "vcuxwfp128": lambda a: fn_op(
+            "__vcuxwfp128", [a.reg(1), a.full_imm(2)], Type.v4f32()
+        ),
+        # VMX128 Rounding Operations (Xbox 360 Xenon)
+        # vrfim128: Round to Float Integer toward -Infinity (floor)
+        "vrfim128": lambda a: fn_op("__vrfim128", [a.reg(1)], Type.v4f32()),
+        # vrfin128: Round to Float Integer toward Nearest
+        "vrfin128": lambda a: fn_op("__vrfin128", [a.reg(1)], Type.v4f32()),
+        # vrfip128: Round to Float Integer toward +Infinity (ceil)
+        "vrfip128": lambda a: fn_op("__vrfip128", [a.reg(1)], Type.v4f32()),
+        # vrfiz128: Round to Float Integer toward Zero (truncate)
+        "vrfiz128": lambda a: fn_op("__vrfiz128", [a.reg(1)], Type.v4f32()),
+        # VMX128 Floating-Point Estimate Operations (Xbox 360 Xenon)
+        # vrefp128: Reciprocal Estimate - VD = 1/VA (per-lane estimate)
+        "vrefp128": lambda a: fn_op("__vrefp128", [a.reg(1)], Type.v4f32()),
+        # vrsqrtefp128: Reciprocal Square Root Estimate - VD = 1/sqrt(VA) (per-lane estimate)
+        "vrsqrtefp128": lambda a: fn_op("__vrsqrtefp128", [a.reg(1)], Type.v4f32()),
+        # vexptefp128: Exponent Estimate - VD = 2^VA (per-lane estimate)
+        "vexptefp128": lambda a: fn_op("__vexptefp128", [a.reg(1)], Type.v4f32()),
+        # vlogefp128: Log Estimate - VD = log2(VA) (per-lane estimate)
+        "vlogefp128": lambda a: fn_op("__vlogefp128", [a.reg(1)], Type.v4f32()),
+        # VMX128 Pack Operations (Xbox 360 Xenon)
+        # vpkshss128: Pack Signed Halfword Signed Saturate - pack 8 signed HWs to 8 signed bytes with saturation
+        "vpkshss128": lambda a: fn_op(
+            "__vpkshss128", [a.reg(1), a.reg(2)], Type.v4f32()
+        ),
+        # vpkshus128: Pack Signed Halfword Unsigned Saturate - pack 8 signed HWs to 8 unsigned bytes with saturation
+        "vpkshus128": lambda a: fn_op(
+            "__vpkshus128", [a.reg(1), a.reg(2)], Type.v4f32()
+        ),
+        # vpkswss128: Pack Signed Word Signed Saturate - pack 4 signed words to 4 signed HWs with saturation
+        "vpkswss128": lambda a: fn_op(
+            "__vpkswss128", [a.reg(1), a.reg(2)], Type.v4f32()
+        ),
+        # vpkswus128: Pack Signed Word Unsigned Saturate - pack 4 signed words to 4 unsigned HWs with saturation
+        "vpkswus128": lambda a: fn_op(
+            "__vpkswus128", [a.reg(1), a.reg(2)], Type.v4f32()
+        ),
+        # vpkuhum128: Pack Unsigned Halfword Unsigned Modulo - pack 8 unsigned HWs to 8 bytes (modulo)
+        "vpkuhum128": lambda a: fn_op(
+            "__vpkuhum128", [a.reg(1), a.reg(2)], Type.v4f32()
+        ),
+        # vpkuhus128: Pack Unsigned Halfword Unsigned Saturate - pack 8 unsigned HWs to 8 bytes with saturation
+        "vpkuhus128": lambda a: fn_op(
+            "__vpkuhus128", [a.reg(1), a.reg(2)], Type.v4f32()
+        ),
+        # vpkuwum128: Pack Unsigned Word Unsigned Modulo - pack 4 unsigned words to 4 HWs (modulo)
+        "vpkuwum128": lambda a: fn_op(
+            "__vpkuwum128", [a.reg(1), a.reg(2)], Type.v4f32()
+        ),
+        # vpkuwus128: Pack Unsigned Word Unsigned Saturate - pack 4 unsigned words to 4 HWs with saturation
+        "vpkuwus128": lambda a: fn_op(
+            "__vpkuwus128", [a.reg(1), a.reg(2)], Type.v4f32()
+        ),
+        # vpkd3d128: Pack D3D Type - pack vector for D3D format specified by immediates
+        "vpkd3d128": lambda a: fn_op(
+            "__vpkd3d128",
+            [a.reg(1), a.full_imm(2), a.full_imm(3), a.full_imm(4)],
+            Type.v4f32(),
+        ),
+        # VMX128 Unpack Operations (Xbox 360 Xenon)
+        # vupkhsb128: Unpack High Signed Byte - unpack high 8 signed bytes to 8 signed HWs
+        "vupkhsb128": lambda a: fn_op("__vupkhsb128", [a.reg(1)], Type.v4f32()),
+        # vupklsb128: Unpack Low Signed Byte - unpack low 8 signed bytes to 8 signed HWs
+        "vupklsb128": lambda a: fn_op("__vupklsb128", [a.reg(1)], Type.v4f32()),
+        # vupkhsh128: Unpack High Signed Halfword - unpack high 4 signed HWs to 4 signed words
+        "vupkhsh128": lambda a: fn_op("__vupkhsh128", [a.reg(1)], Type.v4f32()),
+        # vupklsh128: Unpack Low Signed Halfword - unpack low 4 signed HWs to 4 signed words
+        "vupklsh128": lambda a: fn_op("__vupklsh128", [a.reg(1)], Type.v4f32()),
+        # vupkd3d128: Unpack D3D Type - unpack D3D format vector specified by immediate
+        "vupkd3d128": lambda a: fn_op(
+            "__vupkd3d128", [a.reg(1), a.full_imm(2)], Type.v4f32()
+        ),
     }
     instrs_destination_first: InstrMap = {
         **instrs_dest_first_non_load,
@@ -1586,5 +1891,9 @@ class PpcArch(Arch):
             ),
             Register("r4"): as_u32(
                 Cast(expr, reinterpret=True, silent=False, type=Type.u64())
+            ),
+            # VMX128 vector return register
+            Register("v0"): Cast(
+                expr, reinterpret=True, silent=True, type=Type.v4f32()
             ),
         }
