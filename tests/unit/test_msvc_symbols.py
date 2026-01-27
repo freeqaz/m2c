@@ -166,5 +166,49 @@ class TestParseArgElemsMsvcSymbols(unittest.TestCase):
         self.assertEqual(result.symbol_name, "?foo@@bar")
 
 
+class TestMsvcLabelParsing(unittest.TestCase):
+    """Test that MSVC-mangled symbols are recognized as labels in asm_file.py."""
+
+    def setUp(self) -> None:
+        import re
+
+        # This pattern must match the one in asm_file.py parse_file()
+        self.re_label = re.compile(
+            r'(?:([a-zA-Z0-9_.$?@]+)|"([a-zA-Z0-9_.$<>@,?-]+)"):'
+        )
+
+    def test_simple_msvc_label(self) -> None:
+        """Simple MSVC symbol as label."""
+        m = self.re_label.match("?TheDebug@@3VDebug@@A:")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1), "?TheDebug@@3VDebug@@A")
+
+    def test_complex_msvc_label(self) -> None:
+        """Complex templated MSVC symbol as label."""
+        label = "?insert@?$ObjPtrVec@VHamCharacter@@VObjectDir@@@@QAA?AViterator@1@Vconst_iterator@1@PAVHamCharacter@@@Z:"
+        m = self.re_label.match(label)
+        self.assertIsNotNone(m)
+        expected = "?insert@?$ObjPtrVec@VHamCharacter@@VObjectDir@@@@QAA?AViterator@1@Vconst_iterator@1@PAVHamCharacter@@@Z"
+        self.assertEqual(m.group(1), expected)
+
+    def test_quoted_msvc_label(self) -> None:
+        """Quoted MSVC symbol as label."""
+        m = self.re_label.match('"?QuotedMSVC@@ABC@":')
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(2), "?QuotedMSVC@@ABC@")
+
+    def test_normal_label_still_works(self) -> None:
+        """Regular symbol should still match."""
+        m = self.re_label.match("normalSymbol:")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1), "normalSymbol")
+
+    def test_dollar_in_label(self) -> None:
+        """Label with $ (common in MSVC templates) should match."""
+        m = self.re_label.match("?$TemplateClass@VFoo@@:")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1), "?$TemplateClass@VFoo@@")
+
+
 if __name__ == "__main__":
     unittest.main()

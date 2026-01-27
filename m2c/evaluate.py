@@ -1258,6 +1258,84 @@ def rlwi_mask(mask_begin: int, mask_end: int) -> int:
     return mask
 
 
+def rldi_mask(mask_begin: int, mask_end: int) -> int:
+    """Compute 64-bit mask for rld* instructions. Bit 0=MSB, Bit 63=LSB."""
+    bits_upto: Callable[[int], int] = lambda m: (1 << (64 - m)) - 1
+    all_ones = 0xFFFFFFFFFFFFFFFF
+    if mask_begin <= mask_end:
+        mask = bits_upto(mask_begin) - bits_upto(mask_end + 1)
+    else:
+        mask = (bits_upto(mask_end + 1) - bits_upto(mask_begin)) ^ all_ones
+    return mask
+
+
+def handle_rldicl(source: Expression, shift: int, mask_begin: int) -> Expression:
+    """Rotate Left Doubleword Immediate then Clear Left."""
+    # RLDICL: ROTL64(source, shift) & MASK(mask_begin, 63)
+    mask = rldi_mask(mask_begin, 63)
+    if shift == 0:
+        return BinaryOp.int64(source, "&", Literal(mask))
+    # Full rotate implementation
+    left_shift = shift
+    right_shift = 64 - shift
+    all_ones = 0xFFFFFFFFFFFFFFFF
+    left_mask = (all_ones << left_shift) & mask & all_ones
+    right_mask = (all_ones >> right_shift) & mask
+
+    result_parts = []
+    if left_mask:
+        result_parts.append(BinaryOp.int64(source, "<<", Literal(left_shift)))
+    if right_mask:
+        result_parts.append(BinaryOp.u64(source, ">>", Literal(right_shift)))
+
+    if len(result_parts) == 2:
+        combined = BinaryOp.int64(result_parts[0], "|", result_parts[1])
+        return BinaryOp.int64(combined, "&", Literal(mask))
+    elif result_parts:
+        return BinaryOp.int64(result_parts[0], "&", Literal(mask))
+    return Literal(0)
+
+
+def handle_rldicr(source: Expression, shift: int, mask_end: int) -> Expression:
+    """Rotate Left Doubleword Immediate then Clear Right."""
+    # RLDICR: ROTL64(source, shift) & MASK(0, mask_end)
+    mask = rldi_mask(0, mask_end)
+    if shift == 0:
+        return BinaryOp.int64(source, "&", Literal(mask))
+    left_shift = shift
+    right_shift = 64 - shift
+    all_ones = 0xFFFFFFFFFFFFFFFF
+    left_mask = (all_ones << left_shift) & mask & all_ones
+    right_mask = (all_ones >> right_shift) & mask
+
+    result_parts = []
+    if left_mask:
+        result_parts.append(BinaryOp.int64(source, "<<", Literal(left_shift)))
+    if right_mask:
+        result_parts.append(BinaryOp.u64(source, ">>", Literal(right_shift)))
+
+    if len(result_parts) == 2:
+        combined = BinaryOp.int64(result_parts[0], "|", result_parts[1])
+        return BinaryOp.int64(combined, "&", Literal(mask))
+    elif result_parts:
+        return BinaryOp.int64(result_parts[0], "&", Literal(mask))
+    return Literal(0)
+
+
+def handle_rldic(source: Expression, shift: int, mask_begin: int) -> Expression:
+    """Rotate Left Doubleword Immediate then Clear."""
+    # RLDIC: ROTL64(source, shift) & MASK(mask_begin, 63-shift)
+    mask_end = 63 - shift
+    mask = rldi_mask(mask_begin, mask_end)
+    if shift == 0:
+        return BinaryOp.int64(source, "&", Literal(mask))
+    return BinaryOp.int64(
+        BinaryOp.int64(source, "<<", Literal(shift)),
+        "&",
+        Literal(mask)
+    )
+
+
 def handle_rlwinm(
     source: Expression,
     shift: int,

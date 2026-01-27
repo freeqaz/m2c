@@ -881,10 +881,27 @@ def build_graph_from_block(
                             and isinstance(arg.argument, AsmGlobalSymbol)
                             and any(
                                 arg.argument.symbol_name.startswith(prefix)
-                                for prefix in ("jtbl", "jpt_", "lbl_", "jumptable_")
+                                for prefix in (
+                                    "jtbl", "jpt_", "lbl_", "jumptable_",
+                                    # Xbox 360 / MSVC patterns
+                                    "switch_", "__jtbl", "SwitchTable",
+                                    "?switch@", "??_7",  # MSVC mangled
+                                )
                             )
                         ):
                             jtbl_names.add(arg.argument.symbol_name)
+                        # Direct symbol reference (MSVC style, non-macro)
+                        if (
+                            isinstance(arg, AsmGlobalSymbol)
+                            and any(
+                                arg.symbol_name.startswith(prefix)
+                                for prefix in (
+                                    "jtbl", "jpt_", "lbl_", "jumptable_",
+                                    "switch_", "__jtbl", "SwitchTable",
+                                )
+                            )
+                        ):
+                            jtbl_names.add(arg.symbol_name)
                         if (
                             isinstance(arg, AsmGlobalSymbol)
                             and ins.arch_mnemonic(arch) == "arm:ldr"
@@ -920,6 +937,13 @@ def build_graph_from_block(
                     "setup instructions within the same block as the jump instruction."
                 )
             if not jtbl_names:
+                # No jump table found - for PPC bctr, treat as indirect tail call
+                # This handles virtual function tail calls through vtables
+                if jump.mnemonic == "bctr":
+                    new_node = ReturnNode(block, False, index=0, terminal=terminal_node)
+                    nodes.pop()  # Remove the SwitchNode we added earlier
+                    nodes.append(new_node)
+                    return new_node
                 help_text = ""
                 if arch.arch != Target.ArchEnum.ARM:
                     help_text = (
@@ -978,6 +1002,12 @@ def build_graph_from_block(
         branch_block = find_block_by_label(branch_label.target)
         if branch_block is None:
             target = branch_label.target
+            # For unconditional branches to external symbols (like MSVC-mangled
+            # function names), treat as a tail call rather than failing
+            if not jump.is_conditional:
+                new_node = ReturnNode(block, False, index=0, terminal=terminal_node)
+                nodes.append(new_node)
+                return new_node
             raise DecompFailure(f"Cannot find branch target {target}")
 
         emit_goto = jump.meta.emit_goto

@@ -499,7 +499,8 @@ def parse_file(f: typing.TextIO, arch: ArchAsm, options: Options) -> AsmFile:
     re_local_label = re.compile(
         "loc_|locret_|def_|lbl_|LAB_|switchD_|jump_|_[0-9A-Fa-f]{7,8}(?:_.*)?$"
     )
-    re_label = re.compile(r'(?:([a-zA-Z0-9_.$]+)|"([a-zA-Z0-9_.$<>@,-]+)"):')
+    # Support MSVC-mangled symbols: ? for name mangling, @ for scope separators
+    re_label = re.compile(r'(?:([a-zA-Z0-9_.$?@]+)|"([a-zA-Z0-9_.$<>@,?-]+)"):')
 
     T = TypeVar("T")
 

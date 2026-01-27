@@ -60,8 +60,10 @@ from .translate import (
     TernaryOp,
     UnaryOp,
     as_intish,
+    as_s64,
     as_sintish,
     as_u32,
+    as_u64,
     as_uintish,
     as_type,
     format_hex,
@@ -83,6 +85,9 @@ from .evaluate import (
     handle_load,
     handle_loadx,
     handle_or,
+    handle_rldicl,
+    handle_rldicr,
+    handle_rldic,
     handle_rlwimi,
     handle_rlwinm,
     handle_rlwnm,
@@ -90,6 +95,7 @@ from .evaluate import (
     load_upper,
     make_store,
     make_storex,
+    rldi_mask,
     void_fn_op,
 )
 from .types import FunctionSignature, Type
@@ -171,47 +177,94 @@ class TailCallPattern(AsmPattern):
 
 
 class SaveRestoreRegsFnPattern(AsmPattern):
-    """Expand calls to MWCC's built-in `_{save,rest}{gpr,fpr}_` functions into
-    register saves/restores."""
+    """Expand calls to save/restore register functions into register saves/restores.
+
+    Supports:
+    - MWCC: _savegpr_N, _restgpr_N, _savefpr_N, _restfpr_N
+    - Xbox 360 XDK: __savegprlr_N, __restgprlr_N (includes LR handling)
+    """
 
     def match(self, matcher: AsmMatcher) -> Optional[Replacement]:
-        bl = matcher.input[matcher.index]
-        if (
-            not isinstance(bl, Instruction)
-            or bl.mnemonic != "bl"
-            or not isinstance(bl.args[0], AsmGlobalSymbol)
-        ):
+        instr = matcher.input[matcher.index]
+        if not isinstance(instr, Instruction):
             return None
-        parts = bl.args[0].symbol_name.split("_")
-        if len(parts) != 3 or parts[0]:
+
+        # Accept both 'bl' (call) and 'b' (tail call for restore)
+        is_tail_call = instr.mnemonic == "b"
+        if instr.mnemonic not in ("bl", "b"):
             return None
-        if parts[1] in ("savegpr", "restgpr"):
-            mnemonic = "stw" if parts[1] == "savegpr" else "lwz"
+        if not isinstance(instr.args[0], AsmGlobalSymbol):
+            return None
+
+        symbol_name = instr.args[0].symbol_name
+        parts = symbol_name.split("_")
+
+        # Parse function name
+        save_lr = False
+        if len(parts) == 3 and not parts[0]:
+            # MWCC: _savegpr_N, _restgpr_N, _savefpr_N, _restfpr_N
+            fn_type = parts[1]
+            regnum_str = parts[2]
+        elif len(parts) == 4 and not parts[0] and not parts[1]:
+            # Xbox 360 XDK: __savegprlr_N, __restgprlr_N
+            fn_type = parts[2]
+            regnum_str = parts[3]
+            if fn_type.endswith("lr"):
+                save_lr = True
+                fn_type = fn_type[:-2]  # Remove "lr" suffix: "savegprlr" -> "savegpr"
+        else:
+            return None
+
+        # Only allow restore functions with tail calls (b instead of bl)
+        if is_tail_call and not fn_type.startswith("rest"):
+            return None
+
+        # Determine instruction properties
+        if fn_type in ("savegpr", "restgpr"):
+            mnemonic = "stw" if fn_type == "savegpr" else "lwz"
             size = 4
             reg_prefix = "r"
-        elif parts[1] in ("savefpr", "restfpr"):
-            mnemonic = "stfd" if parts[1] == "savefpr" else "lfd"
+        elif fn_type in ("savefpr", "restfpr"):
+            mnemonic = "stfd" if fn_type == "savefpr" else "lfd"
             size = 8
             reg_prefix = "f"
         else:
             return None
 
-        # Find "addi $r11, $r1, N" above, with perhaps some instructions in between.
-        for i in range(matcher.index - 1, -1, -1):
-            instr = matcher.input[i]
-            if (
-                isinstance(instr, Instruction)
-                and instr.mnemonic == "addi"
-                and instr.args[0] == Register("r11")
-                and instr.args[1] == Register("r1")
-                and isinstance(instr.args[2], AsmLiteral)
-            ):
-                addend = instr.args[2].value
-                break
+        # Find frame setup pattern above the call (MWCC only)
+        addend = None
+        if not save_lr:
+            # MWCC requires "addi r11, r1, N" above the call
+            for i in range(matcher.index - 1, -1, -1):
+                prev = matcher.input[i]
+                if not isinstance(prev, Instruction):
+                    continue
+
+                if (
+                    prev.mnemonic == "addi"
+                    and prev.args[0] == Register("r11")
+                    and prev.args[1] == Register("r1")
+                    and isinstance(prev.args[2], AsmLiteral)
+                ):
+                    addend = prev.args[2].value
+                    break
+
+            if addend is None:
+                return None
         else:
+            # Xbox 360 XDK uses fixed ABI offsets from r1:
+            # - LR saved at r1-4
+            # - r31 at r1-8, r30 at r1-12, etc.
+            # Using addend=-4 gives: r31 at 4*(31-32)+(-4) = -8 (correct)
+            addend = -4
+
+        # Parse register number
+        try:
+            regnum = int(regnum_str)
+        except ValueError:
             return None
 
-        regnum = int(parts[2])
+        # Generate save/restore instructions for r{regnum} through r31
         new_instrs = []
         for i in range(regnum, 32):
             reg = Register(reg_prefix + str(i))
@@ -221,7 +274,57 @@ class SaveRestoreRegsFnPattern(AsmPattern):
                 writeback=None,
             )
             new_instrs.append(AsmInstruction(mnemonic, [reg, stack_pos]))
+
+        # Handle LR for Xbox 360 XDK __savegprlr/__restgprlr functions
+        if save_lr:
+            # Xbox 360 ABI: LR is saved at r1-4
+            # Use 'lr' register directly in generated instructions instead of r12
+            # This avoids issues with r12 being clobbered by intermediate calls
+            lr_stack_pos = AsmAddressMode(
+                base=Register("r1"),
+                addend=AsmLiteral(-4),
+                writeback=None,
+            )
+            if fn_type == "savegpr":
+                # Save: mflr r0; stw r0, -4(r1)
+                new_instrs.append(AsmInstruction("mflr", [Register("r0")]))
+                new_instrs.append(AsmInstruction("stw", [Register("r0"), lr_stack_pos]))
+            else:
+                # Restore: lwz r0, -4(r1); mtlr r0
+                new_instrs.append(AsmInstruction("lwz", [Register("r0"), lr_stack_pos]))
+                new_instrs.append(AsmInstruction("mtlr", [Register("r0")]))
+
+        # For tail call restore, add blr to return
+        if is_tail_call:
+            new_instrs.append(AsmInstruction("blr", []))
+
         return Replacement(new_instrs, 1)
+
+
+class Xbox360MflrPattern(AsmPattern):
+    """Remove mflr r12 before __savegprlr_N since we handle LR directly."""
+
+    def match(self, matcher: AsmMatcher) -> Optional[Replacement]:
+        instr = matcher.input[matcher.index]
+        if not isinstance(instr, Instruction):
+            return None
+        if instr.mnemonic != "mflr" or instr.args[0] != Register("r12"):
+            return None
+        # Check if next instruction is bl __savegprlr_N
+        if matcher.index + 1 >= len(matcher.input):
+            return None
+        next_instr = matcher.input[matcher.index + 1]
+        if not isinstance(next_instr, Instruction):
+            return None
+        if next_instr.mnemonic != "bl":
+            return None
+        if not isinstance(next_instr.args[0], AsmGlobalSymbol):
+            return None
+        if not next_instr.args[0].symbol_name.startswith("__savegprlr_"):
+            return None
+        # Remove the mflr r12 - SaveRestoreRegsFnPattern will handle LR
+        # Pass clobbers=[] to avoid assertion error with empty replacement
+        return Replacement([], 1, clobbers=[])
 
 
 class BoolCastPattern(SimpleAsmPattern):
@@ -489,19 +592,15 @@ class PpcArch(Arch):
                 "r0",
                 "f0",
                 "v0",  # Vector return register
-                "cr0_gt",
-                "cr0_lt",
-                "cr0_eq",
-                "cr0_so",
                 "ctr",
             ]
         ]
+        # CR0, CR1, CR5, CR6, CR7 are caller-saved (volatile)
+        + [Register(f"cr{i}_{b}") for i in (0, 1, 5, 6, 7) for b in ("lt", "gt", "eq", "so")]
     )
     saved_regs = [
         Register(r)
         for r in [
-            # TODO: Some of the bits in CR are required to be saved (like cr2_gt)
-            # When those bits are implemented, they should be added here
             "lr",
             # $r2 & $r13 are used for the small-data region, and are like $gp in MIPS
             "r2",
@@ -556,6 +655,9 @@ class PpcArch(Arch):
             "v30",
             "v31",
         ]
+    ] + [
+        # CR2, CR3, CR4 are callee-saved (nonvolatile) per PPC ABI
+        Register(f"cr{i}_{b}") for i in (2, 3, 4) for b in ("lt", "gt", "eq", "so")
     ]
     all_regs = (
         saved_regs
@@ -566,8 +668,8 @@ class PpcArch(Arch):
             for r in [
                 # `zero` isn't a "real" PPC register; it's a normalized form of `r0`
                 "zero",
-                # TODO: These `crX` registers are only used to parse instructions, but
-                # the instructions that use these registers aren't implemented yet.
+                # These `crX` registers are used to parse compare/branch instructions;
+                # the individual CR bits (cr0_lt, etc.) are stored separately.
                 "cr0",
                 "cr1",
                 "cr2",
@@ -639,6 +741,13 @@ class PpcArch(Arch):
         "stwbrx": 1,
         "stwcx.": 1,
         "stwx": 1,
+        # PPC64 instructions
+        "ld": 1,
+        "ldx": 1,
+        "lwa": 1,
+        "lwax": 1,
+        "std": 1,
+        "stdx": 1,
     }
 
     @classmethod
@@ -782,17 +891,22 @@ class PpcArch(Arch):
 
         instr_str = str(AsmInstruction(mnemonic, args))
 
-        cr0_bits: List[Location] = [
-            Register("cr0_lt"),
-            Register("cr0_gt"),
-            Register("cr0_eq"),
-            Register("cr0_so"),
-        ]
+        def cr_bits(cr_num: int) -> List[Location]:
+            """Return the 4 condition register bits for crN (0-7)."""
+            return [
+                Register(f"cr{cr_num}_lt"),
+                Register(f"cr{cr_num}_gt"),
+                Register(f"cr{cr_num}_eq"),
+                Register(f"cr{cr_num}_so"),
+            ]
+
+        cr0_bits: List[Location] = cr_bits(0)
 
         memory_sizes = {
             "b": 1,
             "h": 2,
             "w": 4,
+            "d": 8,  # PPC64 doubleword (ld, std)
             "fs": 4,
             "fd": 8,
         }
@@ -840,10 +954,15 @@ class PpcArch(Arch):
             "bnslr",
             "bsolr",
         ):
-            # Conditional return
-            # TODO: Support crN argument
+            # Conditional return - supports optional crN argument (e.g., "beqlr cr6")
             assert len(args) <= 1
-            inputs = cr0_bits + [Register("lr")]
+            # Determine which CR field to use (default cr0)
+            cr_num = 0
+            if len(args) == 1 and isinstance(args[0], Register):
+                cr_arg = args[0].register_name
+                if cr_arg.startswith("cr") and len(cr_arg) == 3 and cr_arg[2].isdigit():
+                    cr_num = int(cr_arg[2])
+            inputs = list(cr_bits(cr_num)) + [Register("lr")]
             is_return = True
             is_conditional = True
             # NB: These are rewritten to mnemonic[:-2] by build_blocks in flow_graph.py
@@ -879,22 +998,37 @@ class PpcArch(Arch):
             jump_target = get_jump_target(args[0])
         elif mnemonic in cls.instrs_branches:
             # Normal branch
-            # TODO: Support crN argument
             assert 1 <= len(args) <= 2
             # If the name starts with "!", negate the condition
             raw_name = cls.instrs_branches[mnemonic]
             negated = raw_name.startswith("!")
-            reg_name = raw_name.lstrip("!")
+            base_reg_name = raw_name.lstrip("!")
+
+            # Check if a CR field is specified (e.g., "beq cr6, .label")
+            if len(args) == 2 and isinstance(args[0], Register):
+                cr_arg = args[0].register_name
+                if cr_arg.startswith("cr") and len(cr_arg) == 3 and cr_arg[2].isdigit():
+                    cr_num = int(cr_arg[2])
+                    # Replace cr0 with the specified CR field
+                    reg_name = base_reg_name.replace("cr0", f"cr{cr_num}")
+                else:
+                    reg_name = base_reg_name
+            else:
+                reg_name = base_reg_name
 
             inputs = [Register(reg_name)]
             jump_target = get_jump_target(args[-1])
             is_conditional = True
 
-            def eval_fn(s: NodeState, a: InstrArgs) -> None:
-                cond = a.cmp_reg(reg_name)
-                if negated:
-                    cond = cond.negated()
-                s.set_branch_condition(cond)
+            def make_branch_eval(rn: str, neg: bool) -> Callable[[NodeState, InstrArgs], None]:
+                def eval_fn(s: NodeState, a: InstrArgs) -> None:
+                    cond = a.cmp_reg(rn)
+                    if neg:
+                        cond = cond.negated()
+                    s.set_branch_condition(cond)
+                return eval_fn
+
+            eval_fn = make_branch_eval(reg_name, negated)
 
         elif mnemonic in cls.instrs_store:
             assert isinstance(args[0], Register) and size is not None
@@ -1082,6 +1216,11 @@ class PpcArch(Arch):
             elif mnemonic == "mfctr":
                 assert len(args) == 1
                 inputs = [Register("ctr")]
+            elif mnemonic == "mftb":
+                # Move From Time Base - reads hardware timer
+                # mftb rD, TBR where TBR is 268 (TBL) or 269 (TBU)
+                assert len(args) == 2
+                inputs = []  # No register inputs, reads hardware
             elif mnemonic.rstrip(".") == "rlwimi":
                 assert (
                     len(args) == 5
@@ -1147,19 +1286,27 @@ class PpcArch(Arch):
         elif mnemonic in cls.instrs_ppc_compare:
             assert len(args) == 3 and isinstance(args[1], Register)
             inputs = [r for r in args[1:] if isinstance(r, Register)]
-            outputs = list(cr0_bits)
 
-            def eval_fn(s: NodeState, a: InstrArgs) -> None:
-                base_reg = a.reg_ref(0)
-                if base_reg != Register("cr0"):
-                    error = f'"{instr_str}" is not supported, the first arg is not $cr0'
-                    s.write_statement(error_stmt(error))
-                    return
+            # Get the destination CR field number (cr0-cr7)
+            cr_reg = args[0]
+            assert isinstance(cr_reg, Register)
+            cr_name = cr_reg.register_name
+            if cr_name.startswith("cr") and len(cr_name) == 3 and cr_name[2].isdigit():
+                cr_num = int(cr_name[2])
+            else:
+                cr_num = 0  # Default to cr0 for backwards compatibility
 
-                s.set_reg(Register("cr0_eq"), cls.instrs_ppc_compare[mnemonic](a, "=="))
-                s.set_reg(Register("cr0_gt"), cls.instrs_ppc_compare[mnemonic](a, ">"))
-                s.set_reg(Register("cr0_lt"), cls.instrs_ppc_compare[mnemonic](a, "<"))
-                s.set_reg(Register("cr0_so"), Literal(0))
+            outputs = list(cr_bits(cr_num))
+
+            def make_eval_fn(cr_n: int) -> Callable[[NodeState, InstrArgs], None]:
+                def eval_fn(s: NodeState, a: InstrArgs) -> None:
+                    s.set_reg(Register(f"cr{cr_n}_eq"), cls.instrs_ppc_compare[mnemonic](a, "=="))
+                    s.set_reg(Register(f"cr{cr_n}_gt"), cls.instrs_ppc_compare[mnemonic](a, ">"))
+                    s.set_reg(Register(f"cr{cr_n}_lt"), cls.instrs_ppc_compare[mnemonic](a, "<"))
+                    s.set_reg(Register(f"cr{cr_n}_so"), Literal(0))
+                return eval_fn
+
+            eval_fn = make_eval_fn(cr_num)
 
         elif mnemonic in cls.instrs_ignore:
             pass
@@ -1214,6 +1361,7 @@ class PpcArch(Arch):
         FcmpoCrorPattern(),
         MfcrPattern(),
         TailCallPattern(),
+        Xbox360MflrPattern(),  # Must be before SaveRestoreRegsFnPattern
         SaveRestoreRegsFnPattern(),
         BoolCastPattern(),
         BranchCtrPattern(),
@@ -1230,6 +1378,27 @@ class PpcArch(Arch):
         # For now, we can ignore them (and later use them to help in function_abi)
         "crclr",
         "crset",
+        # Trap instructions - used for assertions/debugging, stub as no-ops
+        # The trap mnemonics are TO field encodings: tw TO,rA,rB / twi TO,rA,SIMM
+        # Common simplified mnemonics:
+        "tw",  # Trap Word (base instruction)
+        "twi",  # Trap Word Immediate (base instruction)
+        # Simplified trap mnemonics (twXX and twiXX forms)
+        "tweq", "tweqi",  # Trap if equal
+        "twne", "twnei",  # Trap if not equal
+        "twlt", "twlti",  # Trap if less than (signed)
+        "twle", "twlei",  # Trap if less than or equal (signed)
+        "twgt", "twgti",  # Trap if greater than (signed)
+        "twge", "twgei",  # Trap if greater than or equal (signed)
+        "twllt", "twllti",  # Trap if logically less than (unsigned)
+        "twlle", "twllei",  # Trap if logically less than or equal (unsigned)
+        "twlgt", "twlgti",  # Trap if logically greater than (unsigned)
+        "twlge", "twlgei",  # Trap if logically greater than or equal (unsigned)
+        "twlng", "twlngi",  # Trap if logically not greater
+        "twlnl", "twlnli",  # Trap if logically not less
+        "twng", "twngi",  # Trap if not greater (signed)
+        "twnl", "twnli",  # Trap if not less (signed)
+        "trap",  # Unconditional trap
     }
 
     instrs_store: StoreInstrMap = {
@@ -1253,6 +1422,9 @@ class PpcArch(Arch):
         "stvrx128": lambda a: make_storex(a, type=Type.v4f32()),  # Right
         "stvlxl128": lambda a: make_storex(a, type=Type.v4f32()),  # Left LRU
         "stvrxl128": lambda a: make_storex(a, type=Type.v4f32()),  # Right LRU
+        # PPC64 64-bit store instructions
+        "std": lambda a: make_store(a, type=Type.s64()),
+        "stdx": lambda a: make_storex(a, type=Type.s64()),
     }
     instrs_store_update: StoreInstrMap = {
         "stbu": lambda a: make_store(a, type=Type.int_of_size(8)),
@@ -1293,6 +1465,11 @@ class PpcArch(Arch):
         "lvrxl128": lambda a: handle_loadx(a, type=Type.v4f32()),  # Right LRU
         "lvsl128": lambda a: handle_loadx(a, type=Type.v4f32()),  # For shift left
         "lvsr128": lambda a: handle_loadx(a, type=Type.v4f32()),  # For shift right
+        # PPC64 64-bit load instructions
+        "ld": lambda a: handle_load(a, type=Type.s64()),
+        "ldx": lambda a: handle_loadx(a, type=Type.s64()),
+        "lwa": lambda a: handle_load(a, type=Type.s32()),  # Load word algebraic (sign-extend)
+        "lwax": lambda a: handle_loadx(a, type=Type.s32()),  # Load word algebraic indexed
     }
     instrs_load_update: InstrMap = {
         "lbau": lambda a: handle_load(a, type=Type.s8()),
@@ -1419,13 +1596,27 @@ class PpcArch(Arch):
         "srawi": lambda a: handle_shift_right(a, signed=True),
         "extsb": lambda a: as_type(a.reg(1), Type.s8(), silent=False),
         "extsh": lambda a: as_type(a.reg(1), Type.s16(), silent=False),
+        "extsw": lambda a: as_type(a.reg(1), Type.s32(), silent=False),  # PPC64: sign-extend word
         "cntlzw": lambda a: UnaryOp("CLZ", a.reg(1), type=Type.intish()),
+        # PPC64 64-bit rotate/mask instructions
+        "rldicl": lambda a: handle_rldicl(a.reg(1), a.imm_value(2), a.imm_value(3)),
+        "rldicr": lambda a: handle_rldicr(a.reg(1), a.imm_value(2), a.imm_value(3)),
+        "rldic": lambda a: handle_rldic(a.reg(1), a.imm_value(2), a.imm_value(3)),
+        # PPC64 64-bit multiply
+        "mulld": lambda a: BinaryOp.int64(a.reg(1), "*", a.reg(2)),
+        # PPC64 64-bit shifts
+        "sld": lambda a: fold_mul_chains(BinaryOp(a.reg(1), "<<", as_intish(a.reg(2)), type=Type.u64())),
+        "srd": lambda a: BinaryOp(as_u64(a.reg(1)), ">>", as_intish(a.reg(2)), type=Type.u64()),
+        "srad": lambda a: fold_divmod(BinaryOp(as_s64(a.reg(1)), ">>", as_intish(a.reg(2)), type=Type.s64())),
+        "sradi": lambda a: fold_divmod(BinaryOp(as_s64(a.reg(1)), ">>", Literal(a.imm_value(2)), type=Type.s64())),
         # Load Immediate
         "li": lambda a: a.full_imm(1),
         "lis": lambda a: load_upper(a),
         # Move from Special Register
         "mflr": lambda a: a.regs[Register("lr")],
         "mfctr": lambda a: a.regs[Register("ctr")],
+        # PPC64 Time Base
+        "mftb": lambda a: fn_op("__mftb", [a.full_imm(1)], Type.u32()),
         # Move pseudoinstructions
         "mr": lambda a: a.reg(1),
         "move.fictive": lambda a: a.reg(1),
@@ -1445,6 +1636,8 @@ class PpcArch(Arch):
         "fctiwz.fictive": lambda a: handle_convert(
             a.reg(1), Type.sintish(), Type.floatish()
         ),
+        # PPC64: Float Convert From Integer Doubleword
+        "fcfid": lambda a: handle_convert(a.reg(1), Type.f64(), Type.s64()),
         "cvt.u.d.fictive": lambda a: handle_convert(
             a.reg(1), Type.uintish(), Type.floatish()
         ),
