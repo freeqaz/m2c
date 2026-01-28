@@ -873,6 +873,40 @@ class PpcArch(Arch):
                 # For the two-argument form of cmpw, the insert an implicit CR0 as the first arg
                 cr0: Argument = Register("cr0")
                 return AsmInstruction(instr.mnemonic, [cr0] + instr.args)
+
+        # Handle Xbox 360 comma-separated load/store syntax:
+        # std r30, -0x18, r1  ->  std r30, -0x18(r1)
+        is_nonindexed_store = (
+            instr.mnemonic in cls.instrs_store
+            or instr.mnemonic in cls.instrs_store_update
+        )
+        is_nonindexed_load = (
+            instr.mnemonic in cls.instrs_load
+            or instr.mnemonic in cls.instrs_load_update
+        )
+
+        if is_nonindexed_store or is_nonindexed_load:
+            # Exclude indexed instructions (end with 'x' or VMX128 with 'x' before '128')
+            is_indexed = instr.mnemonic.endswith("x") or (
+                instr.mnemonic.endswith("128") and "x" in instr.mnemonic
+            )
+            if not is_indexed:
+                # psq_st/psq_l have 2 extra immediate args
+                psq_extra = 2 if instr.mnemonic.startswith("psq_") else 0
+
+                # Detect 3-arg comma format: reg, offset, base_reg
+                if (
+                    len(args) == 3 + psq_extra
+                    and isinstance(args[0], Register)
+                    and isinstance(args[2], Register)
+                    and not isinstance(args[1], AsmAddressMode)
+                ):
+                    addr_mode = AsmAddressMode(
+                        base=args[2], addend=args[1], writeback=None
+                    )
+                    new_args = [args[0], addr_mode] + list(args[3:])
+                    return AsmInstruction(instr.mnemonic, new_args)
+
         return instr
 
     @classmethod
@@ -1437,6 +1471,9 @@ class PpcArch(Arch):
         "stfdu": lambda a: make_store(a, type=Type.f64()),
         "stfsux": lambda a: make_storex(a, type=Type.f32()),
         "stfdux": lambda a: make_storex(a, type=Type.f64()),
+        # PPC64 64-bit store with update instructions
+        "stdu": lambda a: make_store(a, type=Type.s64()),
+        "stdux": lambda a: make_storex(a, type=Type.s64()),
     }
     instrs_load: InstrMap = {
         "lba": lambda a: handle_load(a, type=Type.s8()),
@@ -1486,6 +1523,9 @@ class PpcArch(Arch):
         "lfdu": lambda a: handle_load(a, type=Type.f64()),
         "lfsux": lambda a: handle_loadx(a, type=Type.f32()),
         "lfdux": lambda a: handle_loadx(a, type=Type.f64()),
+        # PPC64 64-bit load with update instructions
+        "ldu": lambda a: handle_load(a, type=Type.s64()),
+        "ldux": lambda a: handle_loadx(a, type=Type.s64()),
     }
 
     instrs_branches: Dict[str, str] = {
