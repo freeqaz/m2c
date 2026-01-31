@@ -38,19 +38,30 @@ _MSVC_SYMBOL_PATTERN = re.compile(
     r"(?=[\s,()]|$)"
 )
 
+# Pattern to match MSVC symbols directly before parentheses (address mode) without
+# a relocation suffix. Handles cases like: lwz r3, ?kAssertStr@@3PBDB(r10)
+_MSVC_SYMBOL_NO_RELOC_PATTERN = re.compile(
+    r"(\?(?:[A-Za-z0-9_$]|@(?!" + _PPC_RELOC_SUFFIXES + r"(?:[\s,()]|$)))+)"
+    r"(?=\()"  # Lookahead for opening paren (address mode)
+)
+
 
 def _normalize_msvc_symbols(line: str) -> str:
-    """Auto-quote MSVC-mangled symbols that conflict with PPC relocation suffixes.
+    """Auto-quote MSVC-mangled symbols that conflict with PPC parsing.
 
-    MSVC symbols start with '?' and may contain '@' characters as scope separators.
-    When such symbols are followed by PPC relocation suffixes (@ha, @l, etc.),
-    the '@' in the symbol conflicts with the relocation marker. This function
-    quotes the symbol portion to disambiguate.
+    Handles two cases:
+    1. Symbols with relocation suffixes: ?sym@ha -> "?sym"@ha
+    2. Symbols before address mode: ?sym(r10) -> "?sym"(r10)
 
-    Example: `lis r11, ?TheDebug@@3VDebug@@A@ha`
-          -> `lis r11, "?TheDebug@@3VDebug@@A"@ha`
+    Examples:
+        `lis r11, ?TheDebug@@3VDebug@@A@ha` -> `lis r11, "?TheDebug@@3VDebug@@A"@ha`
+        `lwz r3, ?kAssertStr@@3PBDB(r10)` -> `lwz r3, "?kAssertStr@@3PBDB"(r10)`
     """
-    return _MSVC_SYMBOL_PATTERN.sub(r'"\1"\2', line)
+    # First handle symbols with relocation suffixes (more specific)
+    line = _MSVC_SYMBOL_PATTERN.sub(r'"\1"\2', line)
+    # Then handle symbols directly before parentheses
+    line = _MSVC_SYMBOL_NO_RELOC_PATTERN.sub(r'"\1"', line)
+    return line
 
 
 @dataclass(frozen=True)

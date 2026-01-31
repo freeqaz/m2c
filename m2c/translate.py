@@ -4193,7 +4193,7 @@ class GlobalInfo:
             ):
                 try:
                     demangled_symbol = demangle_codewarrior_parse(sym_name)
-                except ValueError:
+                except (ValueError, AssertionError):
                     pass
                 else:
                     demangled_str = str(demangled_symbol)
@@ -4277,7 +4277,7 @@ class GlobalInfo:
                     demangled_field_sym = demangle_codewarrior_parse(sym)
                     if demangled_field_sym.name.qualified_name is not None:
                         entry_name = str(demangled_field_sym.name.qualified_name[-1])
-                except ValueError:
+                except (ValueError, AssertionError):
                     pass
 
                 field = struct.try_add_field(

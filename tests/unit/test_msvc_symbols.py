@@ -104,6 +104,26 @@ class TestNormalizeMsvcSymbols(unittest.TestCase):
         result = _normalize_msvc_symbols("?foo@@bar@ha, r11")
         self.assertEqual(result, '"?foo@@bar"@ha, r11')
 
+    def test_msvc_symbol_before_paren_no_reloc(self) -> None:
+        """MSVC symbol directly before parenthesis (no reloc)."""
+        result = _normalize_msvc_symbols("?kAssertStr@@3PBDB(r10)")
+        self.assertEqual(result, '"?kAssertStr@@3PBDB"(r10)')
+
+    def test_full_instruction_lwz_no_reloc(self) -> None:
+        """Full lwz instruction with MSVC symbol in address mode."""
+        result = _normalize_msvc_symbols("lwz r3, ?kAssertStr@@3PBDB(r10)")
+        self.assertEqual(result, 'lwz r3, "?kAssertStr@@3PBDB"(r10)')
+
+    def test_msvc_symbol_with_reloc_before_paren(self) -> None:
+        """MSVC symbol with reloc suffix before paren - uses reloc pattern."""
+        result = _normalize_msvc_symbols("?foo@ha(r10)")
+        self.assertEqual(result, '"?foo"@ha(r10)')
+
+    def test_msvc_ha_in_name_before_paren(self) -> None:
+        """@ha in middle of symbol name (not reloc) before paren."""
+        result = _normalize_msvc_symbols("?foo@habla(r10)")
+        self.assertEqual(result, '"?foo@habla"(r10)')
+
 
 class TestParseArgElemsMsvcSymbols(unittest.TestCase):
     """Test full argument parsing with preprocessed (quoted) MSVC symbols.
