@@ -346,6 +346,110 @@ class BoolCastPattern(SimpleAsmPattern):
             return Replacement([m.body[0], boolcast], len(m.body))
 
 
+class BdzfCascadePattern(AsmPattern):
+    """Rewrite mtctr + bdzf cascade (MSVC PPC switch pattern) into cmpwi + beq pairs.
+
+    The MSVC PPC compiler generates a bdzf cascade for certain switch statements:
+        cmplwi cr6, rX, 8      ; bounds check (before this pattern)
+        bgt    cr6, default     ; (before this pattern)
+        mtctr  rX               ; load switch value into CTR
+        cmpwi  cr6, rX, 0      ; set cr6eq for case-0 detection
+        bdzf   cr6eq, case1    ; decrement CTR; branch if CTR==0 AND cr6eq==false
+        bdzf   cr6eq, case2    ; → case 2
+        ...
+        bne    cr6, case8      ; if mState != 0 → last case (not consumed)
+        ; fall through → case 0
+
+    Each bdzf at position N (1-indexed) matches switch value N.
+    We rewrite this into equivalent cmpwi + beq pairs.
+    """
+
+    def match(self, matcher: AsmMatcher) -> Optional[Replacement]:
+        idx = matcher.index
+        body = matcher.input
+
+        # Match mtctr rX
+        if idx >= len(body):
+            return None
+        mtctr = body[idx]
+        if not isinstance(mtctr, Instruction) or mtctr.mnemonic != "mtctr":
+            return None
+
+        # The register loaded into CTR
+        assert len(mtctr.args) == 1 and isinstance(mtctr.args[0], Register)
+        switch_reg = mtctr.args[0]
+
+        # Collect intermediate instructions and bdzf cascade
+        intermediates: list = []
+        bdzf_instrs: list = []
+        pos = idx + 1
+
+        # Scan forward: collect intermediates until we hit the first bdzf,
+        # then collect all consecutive bdzf instructions
+        in_cascade = False
+        while pos < len(body):
+            item = body[pos]
+            if not isinstance(item, Instruction):
+                break
+            if item.mnemonic in ("bdzf", "bdzt"):
+                in_cascade = True
+                bdzf_instrs.append(item)
+                pos += 1
+            elif not in_cascade:
+                # Intermediate instruction before the cascade (e.g. cmpwi cr6, rX, 0)
+                intermediates.append(item)
+                pos += 1
+            else:
+                # Non-bdzf after cascade started — stop
+                break
+
+        if not bdzf_instrs:
+            return None
+
+        # Build replacement: cmpwi + beq pairs for each bdzf
+        new_body: list = []
+        for case_num, bdzf in enumerate(bdzf_instrs, start=1):
+            # Extract CR field from the CR bit argument (e.g. "cr6eq" -> "cr6")
+            # The CR bit arg is parsed as AsmGlobalSymbol since cr6eq is not
+            # a known register name
+            assert len(bdzf.args) >= 2
+            cr_bit_arg = bdzf.args[0]
+            if isinstance(cr_bit_arg, AsmGlobalSymbol):
+                cr_bit_name = cr_bit_arg.symbol_name
+            elif isinstance(cr_bit_arg, Register):
+                cr_bit_name = cr_bit_arg.register_name
+            else:
+                return None
+            # Strip the condition suffix to get the CR field name
+            cr_field = cr_bit_name.rstrip("eqgtltso")
+            if not cr_field:
+                cr_field = "cr0"
+
+            # Branch target is the last argument
+            branch_target = bdzf.args[-1]
+
+            # For bdzf: branch when CTR==0 AND condition bit is false
+            # CTR counts down from the switch value, so CTR==0 at position N means
+            # the original value was N
+            # For bdzt: branch when CTR==0 AND condition bit is true (opposite sense)
+            # Either way, the countdown logic means case_num is the switch value
+            new_body.append(
+                AsmInstruction(
+                    "cmpwi", [Register(cr_field), switch_reg, AsmLiteral(case_num)]
+                )
+            )
+            new_body.append(
+                AsmInstruction("beq", [Register(cr_field), branch_target])
+            )
+
+        # Append intermediate instructions after all beq pairs
+        # (preserves cr6 state for trailing bne cr6, caseN)
+        new_body.extend(intermediates)
+
+        num_consumed = pos - idx
+        return Replacement(new_body, num_consumed)
+
+
 class BranchCtrPattern(AsmPattern):
     """Split decrement-$ctr-and-branch instructions into a pair of instructions."""
 
@@ -1342,6 +1446,15 @@ class PpcArch(Arch):
 
             eval_fn = make_eval_fn(cr_num)
 
+        elif mnemonic in ("bdzf", "bdzt", "bdnzf", "bdnzt"):
+            # Conditional decrement-CTR-and-branch (e.g. bdzf cr6eq, .label)
+            # These are rewritten by BdzfCascadePattern before evaluation
+            assert len(args) == 2
+            inputs = [Register("ctr")]
+            jump_target = get_jump_target(args[-1])
+            is_conditional = True
+            eval_fn = unreachable_eval
+
         elif mnemonic in cls.instrs_ignore:
             pass
         else:
@@ -1398,6 +1511,7 @@ class PpcArch(Arch):
         Xbox360MflrPattern(),  # Must be before SaveRestoreRegsFnPattern
         SaveRestoreRegsFnPattern(),
         BoolCastPattern(),
+        BdzfCascadePattern(),
         BranchCtrPattern(),
         FloatishToUintPattern(),
         StructCopyPattern(),

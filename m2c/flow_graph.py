@@ -956,6 +956,13 @@ def build_graph_from_block(
 
             jtbl_name = list(jtbl_names)[0]
             if jtbl_name not in asm_data.values:
+                # For PPC bctr, fall back to treating as indirect tail call
+                # when jump table data is unavailable (e.g. piped from objdiff)
+                if jump.mnemonic == "bctr":
+                    new_node = ReturnNode(block, False, index=0, terminal=terminal_node)
+                    nodes.pop()  # Remove the SwitchNode we added earlier
+                    nodes.append(new_node)
+                    return new_node
                 raise DecompFailure(
                     f"Found {jump.mnemonic} instruction {jump.meta.loc_str()}, but the "
                     "corresponding jump table is not provided.\n"

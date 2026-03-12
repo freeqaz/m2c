@@ -22,7 +22,7 @@ from .flow_graph import (
     SwitchNode,
     TerminalNode,
 )
-from .options import Options, Target
+from .options import NoiseLevel, Options, Target
 from .translate import (
     BinaryOp,
     BlockInfo,
@@ -1490,21 +1490,41 @@ def get_function_text(function_info: FunctionInfo, options: Options) -> str:
                 )
                 any_decl = True
 
-        temp_decls = []
+        temp_decls: List[Union[str, Tuple[str, List[str]]]] = []
         for var in function_info.stack_info.temp_vars:
             if var.is_emitted:
                 type_decl = var.type.to_decl(var.format(fmt), fmt)
-                temp_decls.append(f"{type_decl};")
+                decl_str = f"{type_decl};"
+                if options.noise_level == NoiseLevel.MINIMAL:
+                    temp_decls.append(f"/* {decl_str} -- artifact */")
+                elif options.noise_level == NoiseLevel.LOW:
+                    temp_decls.append((decl_str, ["artifact"]))
+                else:
+                    temp_decls.append(decl_str)
                 any_decl = True
 
-        var_sort = (lambda d: d.split("_")[1]) if fmt.descending_regs else None
+        def var_sort_key(d: Union[str, Tuple[str, List[str]]]) -> str:
+            s = d[0] if isinstance(d, tuple) else d
+            return s.split("_")[1]
+
+        var_sort = var_sort_key if fmt.descending_regs else None
 
         for decl in sorted(temp_decls, key=var_sort, reverse=fmt.descending_regs):
-            function_lines.append(SimpleStatement(decl).format(fmt))
+            if isinstance(decl, tuple):
+                decl_str, comments = decl
+                function_lines.append(SimpleStatement(decl_str, comments=comments).format(fmt))
+            else:
+                function_lines.append(SimpleStatement(decl).format(fmt))
 
         for phi_var in function_info.stack_info.naive_phi_vars:
             type_decl = phi_var.type.to_decl(phi_var.get_var_name(), fmt)
-            function_lines.append(SimpleStatement(f"{type_decl};").format(fmt))
+            decl_str = f"{type_decl};"
+            if options.noise_level == NoiseLevel.MINIMAL:
+                function_lines.append(SimpleStatement(f"/* {decl_str} -- artifact */").format(fmt))
+            elif options.noise_level == NoiseLevel.LOW:
+                function_lines.append(SimpleStatement(decl_str, comments=["artifact"]).format(fmt))
+            else:
+                function_lines.append(SimpleStatement(decl_str).format(fmt))
             any_decl = True
 
         # Create a variable to cast the original first argument to the assumed type

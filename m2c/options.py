@@ -15,6 +15,12 @@ class ChoicesEnum(enum.Enum):
         return str(self.value)
 
 
+class NoiseLevel(ChoicesEnum):
+    FULL = "full"
+    LOW = "low"
+    MINIMAL = "minimal"
+
+
 @dataclass(frozen=True)
 class CodingStyle:
     class CommentStyle(ChoicesEnum):
@@ -184,6 +190,8 @@ class Options:
     backwards_bss: bool
     disable_gc: bool
     union_field_overrides: Dict[str, str]
+    noise_level: NoiseLevel
+    show_offsets: bool
 
     def formatter(self) -> Formatter:
         return Formatter(
@@ -194,6 +202,7 @@ class Options:
             valid_syntax=self.valid_syntax,
             descending_regs=self.descending_regs,
             backwards_bss=self.backwards_bss,
+            show_offsets=self.show_offsets,
         )
 
 
@@ -223,6 +232,7 @@ class Formatter:
     force_decimal: bool = False
     descending_regs: bool = False
     backwards_bss: bool = False
+    show_offsets: bool = False
 
     def indent(self, line: str, indent: int = 0) -> str:
         return self.indent_step * max(indent + self.extra_indent, 0) + line

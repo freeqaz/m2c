@@ -354,11 +354,15 @@ def simplify_ir_patterns(
                 # pattern, like random nops: these aren't allowed)
                 cand = state.try_map_ref(pat_ref)
                 pat_inputs = pattern.flow_graph.instr_inputs[pat_ref]
-                if not (
-                    isinstance(cand, InstrRef)
-                    and state.match_instr(pat_ref.instruction, cand.instruction)
-                    and state.match_inputrefs(pat_inputs, flow_graph.instr_inputs[cand])
-                ):
+                try:
+                    matched = (
+                        isinstance(cand, InstrRef)
+                        and state.match_instr(pat_ref.instruction, cand.instruction)
+                        and state.match_inputrefs(pat_inputs, flow_graph.instr_inputs[cand])
+                    )
+                except AssertionError:
+                    matched = False
+                if not matched:
                     is_match = False
                     break
 

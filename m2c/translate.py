@@ -621,9 +621,11 @@ def get_stack_info(
             info.allocated_stack_size = temp_reg_values[inst.args[2]]
         elif arch_mnemonic == "ppc:stwu" and inst.args[0] == arch.stack_pointer_reg:
             # Moving the stack pointer on PPC
-            assert isinstance(inst.args[1], AsmAddressMode)
-            assert isinstance(inst.args[1].addend, AsmLiteral)
-            info.allocated_stack_size = abs(inst.args[1].addend.value)
+            if (
+                isinstance(inst.args[1], AsmAddressMode)
+                and isinstance(inst.args[1].addend, AsmLiteral)
+            ):
+                info.allocated_stack_size = abs(inst.args[1].addend.value)
         elif arch_mnemonic == "arm:push":
             assert isinstance(inst.args[0], RegisterList)
             for reg in inst.args[0].regs[::-1]:
@@ -1591,7 +1593,13 @@ class StructAccess(Expression):
         if self.offset == 0 and not has_nonzero_access:
             return f"{'*' if deref else ''}{var.format(fmt)}"
 
-        return f"{parenthesize_for_struct_access(var, fmt)}{field_name}"
+        result = f"{parenthesize_for_struct_access(var, fmt)}{field_name}"
+
+        # Add offset comment if enabled
+        if fmt.show_offsets and self.offset != 0:
+            result = f"{result} /* 0x{self.offset:X} */"
+
+        return result
 
 
 @dataclass(frozen=True, eq=True)
@@ -3638,7 +3646,9 @@ class NodeState:
         self.branch_condition = cond
 
     def set_switch_expr(self, expr: Expression, just_index: bool = False) -> None:
-        assert isinstance(self.node, SwitchNode)
+        if not isinstance(self.node, SwitchNode):
+            # bctr without jump table data - treated as indirect tail call
+            return
         assert self.switch_control is None
         if just_index:
             self.switch_control = SwitchControl(expr, num_cases=len(self.node.cases))
@@ -3862,7 +3872,8 @@ def evaluate_instruction(instr_ref: InstrRef, state: NodeState) -> None:
 
     # Check that conditional instructions set at least one of branch_condition or switch_control
     if instr.is_conditional:
-        assert state.branch_condition is not None or state.switch_control is not None
+        if not isinstance(state.node, ReturnNode):  # bctr fallback to tail call
+            assert state.branch_condition is not None or state.switch_control is not None
 
 
 def translate_node_body(state: NodeState) -> BlockInfo:

@@ -10,7 +10,7 @@ from .c_types import build_typemap, dump_typemap
 from .error import DecompFailure
 from .flow_graph import FlowGraph, build_flowgraph
 from .if_statements import get_function_text
-from .options import CodingStyle, Options, Target
+from .options import CodingStyle, NoiseLevel, Options, Target
 from .asm_file import AsmData, Function, parse_file
 from .instruction import InstrProcessingFailure
 from .translate import (
@@ -498,6 +498,33 @@ def parse_flags(flags: List[str]) -> Options:
         action="store_true",
         help="Sort bss variables backwards compared to what's in the asm",
     )
+    group.add_argument(
+        "--noise",
+        dest="noise_level",
+        type=NoiseLevel,
+        choices=list(NoiseLevel),
+        default="full",
+        help="Output noise level: full (default), low (annotate artifacts), minimal (comment out artifacts)",
+    )
+    group.add_argument(
+        "--low-noise",
+        dest="noise_level",
+        action="store_const",
+        const=NoiseLevel.LOW,
+        help="Shorthand for --noise=low",
+    )
+    group.add_argument(
+        "--show-offsets",
+        dest="show_offsets",
+        action="store_true",
+        help="Show struct field offsets in comments",
+    )
+    group.add_argument(
+        "--decomp",
+        dest="decomp",
+        action="store_true",
+        help="Decomp-friendly output: enables --noise=low --show-offsets",
+    )
 
     group = parser.add_argument_group("Analysis Options")
     group.add_argument(
@@ -671,6 +698,12 @@ def parse_flags(flags: List[str]) -> Options:
         args.debug = False
         args.debug_patterns = False
 
+    # Handle --decomp preset
+    if args.decomp:
+        if args.noise_level == NoiseLevel.FULL:
+            args.noise_level = NoiseLevel.LOW
+        args.show_offsets = True
+
     return Options(
         filenames=args.filenames,
         function_indexes_or_names=functions,
@@ -710,6 +743,8 @@ def parse_flags(flags: List[str]) -> Options:
         backwards_bss=args.backwards_bss,
         disable_gc=args.disable_gc,
         union_field_overrides=union_field_overrides,
+        noise_level=args.noise_level,
+        show_offsets=args.show_offsets,
     )
 
 
